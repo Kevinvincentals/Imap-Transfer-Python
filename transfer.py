@@ -15,6 +15,19 @@ def choose_mailbox(client, prompt):
             return mailboxes[int(choice) - 1]
         print("Invalid choice, please try again.")
 
+def match_mailboxes(source_client, dest_client):
+    """Match source and destination mailboxes based on their names."""
+    source_mailboxes = [box[-1] for box in source_client.list_folders()]
+    dest_mailboxes = [box[-1] for box in dest_client.list_folders()]
+
+    matches = []
+    for src_box in source_mailboxes:
+        for dest_box in dest_mailboxes:
+            if src_box.lower() == dest_box.lower():
+                matches.append((src_box, dest_box))
+                break
+    return matches
+
 # Source account details
 source_host = input("Enter the source host (IMAP server): ")
 source_username = input("Enter the source username: ")
@@ -40,26 +53,94 @@ def connect_imap(host, username, password):
 with connect_imap(source_host, source_username, source_password) as source_client, \
      connect_imap(dest_host, dest_username, dest_password) as dest_client:
 
-    source_mailbox = choose_mailbox(source_client, "Source mailboxes:")
-    dest_mailbox = choose_mailbox(dest_client, "Destination mailboxes:")
+    auto_move = input("Do you want to automatically match mailboxes and move emails? (y/n): ").lower().strip() == "y"
 
-    # Select the mailbox you want to copy from in the source account
-    select_info = source_client.select_folder(source_mailbox)
+    if auto_move:
+        matches = match_mailboxes(source_client, dest_client)
+        if not matches:
+            print("No matching mailboxes found.")
+            exit()
 
-    # Fetch all message id's from source mailbox
-    messages = source_client.search('ALL')
+        for src_box, dest_box in matches:
+            print(f"\nMoving emails from {src_box} to {dest_box}...")
+            source_client.select_folder(src_box)
+            dest_client.select_folder(dest_box)
 
-    print(f"\nTotal emails to be copied: {len(messages)}")
+            # Fetch all message IDs from source mailbox
+            source_messages = source_client.search('ALL')
 
-    # Get the full message data (including FLAGS) for the messages
-    response = source_client.fetch(messages, ['BODY.PEEK[]', 'FLAGS'])
+            # Fetch all message IDs from destination mailbox
+            dest_messages = dest_client.search('ALL')
 
-    for msgid in tqdm(response.keys(), desc="Copying emails", unit="email"):
-        raw_message = response[msgid][b'BODY[]']
-        message = message_from_bytes(raw_message)
-        flags = response[msgid][b'FLAGS']
+            # Get the message IDs already present in the destination mailbox
+            dest_message_ids = set(dest_messages)
 
-        # Save the messages to the destination mailbox with same flags
-        dest_client.append(dest_mailbox, message.as_bytes(), flags=flags)
+            # Filter out the already transferred messages from the source mailbox
+            messages = [msg_id for msg_id in source_messages if msg_id not in dest_message_ids]
 
-    print(f"\n{len(response)} messages copied from {source_mailbox} to {dest_mailbox}.")
+            print(f"Total emails to be copied: {len(messages)}")
+
+            # Get the full message data (including FLAGS) for the messages
+            response = source_client.fetch(messages, ['BODY.PEEK[]', 'FLAGS'])
+
+            transferred_count = 0
+            duplicate_count = 0
+
+            for msgid in tqdm(response.keys(), desc="Copying emails", unit="email"):
+                raw_message = response[msgid][b'BODY[]']
+                message = message_from_bytes(raw_message)
+                flags = response[msgid][b'FLAGS']
+
+                # Check if the message is already present in the destination mailbox
+                dest_search = dest_client.search(['HEADER', 'Message-ID', message['Message-ID']])
+                if dest_search:
+                    duplicate_count += 1
+                else:
+                    dest_client.append(dest_box, message.as_bytes(), flags=flags)
+                    transferred_count += 1
+
+            print(f"{transferred_count} messages copied from {src_box} to {dest_box}.")
+            print(f"{duplicate_count} duplicate messages skipped.")
+
+    else:
+        source_mailbox = choose_mailbox(source_client, "Source mailboxes:")
+        dest_mailbox = choose_mailbox(dest_client, "Destination mailboxes:")
+
+        source_client.select_folder(source_mailbox)
+        dest_client.select_folder(dest_mailbox)
+
+        # Fetch all message IDs from source mailbox
+        source_messages = source_client.search('ALL')
+
+        # Fetch all message IDs from destination mailbox
+        dest_messages = dest_client.search('ALL')
+
+        # Get the message IDs already present in the destination mailbox
+        dest_message_ids = set(dest_messages)
+
+        # Filter out the already transferred messages from the source mailbox
+        messages = [msg_id for msg_id in source_messages if msg_id not in dest_message_ids]
+
+        print(f"\nTotal emails to be copied: {len(messages)}")
+
+        # Get the full message data (including FLAGS) for the messages
+        response = source_client.fetch(messages, ['BODY.PEEK[]', 'FLAGS'])
+
+        transferred_count = 0
+        duplicate_count = 0
+
+        for msgid in tqdm(response.keys(), desc="Copying emails", unit="email"):
+            raw_message = response[msgid][b'BODY[]']
+            message = message_from_bytes(raw_message)
+            flags = response[msgid][b'FLAGS']
+
+            # Check if the message is already present in the destination mailbox
+            dest_search = dest_client.search(['HEADER', 'Message-ID', message['Message-ID']])
+            if dest_search:
+                duplicate_count += 1
+            else:
+                dest_client.append(dest_mailbox, message.as_bytes(), flags=flags)
+                transferred_count += 1
+
+        print(f"{transferred_count} messages copied from {source_mailbox} to {dest_mailbox}.")
+        print(f"{duplicate_count} duplicate messages skipped.")
