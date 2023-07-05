@@ -11,4 +11,6 @@ This script has been tested with 60,000 emails, which took around 30 minutes to 
 ## Roadmap
 
 ~~1. Adding logic to handle if disconnects happen (avoid duplicating mails, etc).~~ (Done)
+
 2. Implement Flask frontend and make the service public
+
