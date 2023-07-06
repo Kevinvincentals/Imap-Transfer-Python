@@ -80,6 +80,9 @@ with connect_imap(source_host, source_username, source_password) as source_clien
 
             print(f"Total emails to be copied: {len(messages)}")
 
+            if len(messages) > 4000:
+                print("Due to the large quantity of emails, this may take some time. Please wait...")
+
             # Get the full message data (including FLAGS) for the messages
             response = source_client.fetch(messages, ['BODY.PEEK[]', 'FLAGS'])
 
@@ -92,7 +95,9 @@ with connect_imap(source_host, source_username, source_password) as source_clien
                 flags = response[msgid][b'FLAGS']
 
                 # Check if the message is already present in the destination mailbox
-                dest_search = dest_client.search(['HEADER', 'Message-ID', message['Message-ID']])
+                message_id = message['Message-ID'].strip() if message['Message-ID'] else ''
+                dest_search = dest_client.search(['HEADER', 'Message-ID', message_id]) if message_id else []
+
                 if dest_search:
                     duplicate_count += 1
                 else:
@@ -123,6 +128,9 @@ with connect_imap(source_host, source_username, source_password) as source_clien
 
         print(f"\nTotal emails to be copied: {len(messages)}")
 
+        if len(messages) > 4000:
+            print("Due to the large quantity of emails, this may take some time. Please wait...")
+
         # Get the full message data (including FLAGS) for the messages
         response = source_client.fetch(messages, ['BODY.PEEK[]', 'FLAGS'])
 
@@ -135,7 +143,8 @@ with connect_imap(source_host, source_username, source_password) as source_clien
             flags = response[msgid][b'FLAGS']
 
             # Check if the message is already present in the destination mailbox
-            dest_search = dest_client.search(['HEADER', 'Message-ID', message['Message-ID']])
+            message_id = message['Message-ID'].strip() if message['Message-ID'] else ''
+            dest_search = dest_client.search(['HEADER', 'Message-ID', message_id]) if message_id else []
             if dest_search:
                 duplicate_count += 1
             else:
