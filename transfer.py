@@ -7,6 +7,8 @@ from email import message_from_bytes
 from tqdm import tqdm
 import shutil
 
+
+
 def choose_mailbox(client, prompt):
     """Let the user choose a mailbox from the given IMAPClient instance."""
     mailboxes = [box[-1] for box in client.list_folders()]
@@ -20,14 +22,24 @@ def choose_mailbox(client, prompt):
         print("Invalid choice, please try again.")
 
 def match_mailboxes(source_client, dest_client):
-    """Match source and destination mailboxes based on their names."""
+    """Match source and destination mailboxes based on their names or aliases."""
     source_mailboxes = [box[-1] for box in source_client.list_folders()]
     dest_mailboxes = [box[-1] for box in dest_client.list_folders()]
+
+    mailbox_aliases = {
+        "inbox": ["inbox"],
+        "sent": ["sent", "sent items", "inbox.sent", "inbox.sent items"],
+        "trash": ["trash", "inbox.trash", "deleted", "delete"],
+        "archive": ["archive", "archived", "inbox.archive", "inbox.archived", "arkiv"],
+        "spam": ["spam", "junk", "inbox.spam", "inbox.junk"],
+        "drafts": ["drafts", "inbox.drafts"],
+        # Add more aliases as needed
+    }
 
     matches = []
     for src_box in source_mailboxes:
         for dest_box in dest_mailboxes:
-            if src_box.lower() == dest_box.lower():
+            if src_box.lower() == dest_box.lower() or dest_box.lower() in [alias.lower() for alias in mailbox_aliases.get(src_box.lower(), [])]:
                 matches.append((src_box, dest_box))
                 break
     return matches
@@ -107,19 +119,18 @@ if backup_option == '1':
                 if len(messages) > 4000:
                     print("Due to the large quantity of emails, this may take some time. Please wait...")
 
-                # Get the full message data (including FLAGS) for the messages
-                response = source_client.fetch(messages, ['BODY.PEEK[]', 'FLAGS', 'RFC822.SIZE'])
-
                 transferred_count = 0
                 duplicate_count = 0
                 total_size = 0
 
-                with tqdm(total=len(response), desc="Copying emails", unit="email", ncols=80) as pbar:
-                    for msgid in response.keys():
-                        raw_message = response[msgid][b'BODY[]']
+                with tqdm(total=len(messages), desc="Copying emails", unit="email", ncols=80) as pbar:
+                    for msg_id in messages:
+                        # Fetch message data from source mailbox
+                        response = source_client.fetch(msg_id, ['BODY.PEEK[]', 'FLAGS', 'RFC822.SIZE'])
+                        raw_message = response[msg_id][b'BODY[]']
                         message = message_from_bytes(raw_message)
-                        flags = response[msgid][b'FLAGS']
-                        size = response[msgid][b'RFC822.SIZE']
+                        flags = response[msg_id][b'FLAGS']
+                        size = response[msg_id][b'RFC822.SIZE']
                         total_size += size
 
                         # Check if the message is already present in the destination mailbox
@@ -132,7 +143,7 @@ if backup_option == '1':
                             dest_client.append(dest_box, message.as_bytes(), flags=flags)
                             transferred_count += 1
 
-                        pbar.set_postfix({"Size moved:": f"{total_size/(1024*1024):.2f} MB"})
+                        pbar.set_postfix({"Size moved:": f"{total_size / (1024 * 1024):.2f} MB"})
                         pbar.update(1)
 
                 print(f"\n{transferred_count} messages copied from {src_box} to {dest_box}.")
@@ -149,47 +160,35 @@ if backup_option == '1':
             # Fetch all message IDs from source mailbox
             source_messages = source_client.search('ALL')
 
-            # Fetch all message IDs from destination mailbox
-            dest_messages = dest_client.search('ALL')
-
-            # Get the message IDs already present in the destination mailbox
-            dest_message_ids = set(dest_messages)
-
-            # Filter out the already transferred messages from the source mailbox
-            messages = [msg_id for msg_id in source_messages if msg_id not in dest_message_ids]
-
-            print(f"\nTotal emails to be copied: {len(messages)}")
-
-            if len(messages) > 4000:
-                print("Due to the large quantity of emails, this may take some time. Please wait...")
-
-            # Get the full message data (including FLAGS) for the messages
-            response = source_client.fetch(messages, ['BODY.PEEK[]', 'FLAGS', 'RFC822.SIZE'])
+            print(f"\nTotal emails to be copied: {len(source_messages)}")
 
             transferred_count = 0
             duplicate_count = 0
             total_size = 0
 
-            with tqdm(total=len(response), desc="Copying emails", unit="email", ncols=80) as pbar:
-                    for msgid in response.keys():
-                        raw_message = response[msgid][b'BODY[]']
-                        message = message_from_bytes(raw_message)
-                        flags = response[msgid][b'FLAGS']
-                        size = response[msgid][b'RFC822.SIZE']
-                        total_size += size
+            with tqdm(total=len(source_messages), desc="Copying emails", unit="email", ncols=80) as pbar:
+                for msg_id in source_messages:
+                    # Fetch message data from source mailbox
+                    response = source_client.fetch(msg_id, ['BODY.PEEK[]', 'FLAGS', 'RFC822.SIZE'])
+                    raw_message = response[msg_id][b'BODY[]']
+                    message = message_from_bytes(raw_message)
+                    flags = response[msg_id][b'FLAGS']
+                    size = response[msg_id][b'RFC822.SIZE']
+                    total_size += size
 
-                        # Check if the message is already present in the destination mailbox
-                        message_id = message['Message-ID'].strip() if message['Message-ID'] else ''
-                        dest_search = dest_client.search(['HEADER', 'Message-ID', message_id]) if message_id else []
+                    # Check if the message is already present in the destination mailbox
+                    message_id = message['Message-ID'].strip() if message['Message-ID'] else ''
+                    dest_search = dest_client.search(['HEADER', 'Message-ID', message_id]) if message_id else []
 
-                        if dest_search:
-                            duplicate_count += 1
-                        else:
-                            dest_client.append(dest_mailbox, message.as_bytes(), flags=flags)
-                            transferred_count += 1
+                    if dest_search:
+                        duplicate_count += 1
+                    else:
+                        dest_client.append(dest_mailbox, message.as_bytes(), flags=flags)
+                        transferred_count += 1
 
-                        pbar.set_postfix({"Transferred": transferred_count, "Duplicates": duplicate_count, "Total Size": f"{total_size/(1024*1024):.2f} MB"})
-                        pbar.update(1)
+                    pbar.set_postfix({"Transferred": transferred_count, "Duplicates": duplicate_count,
+                                      "Total Size": f"{total_size / (1024 * 1024):.2f} MB"})
+                    pbar.update(1)
 
             print(f"\n{transferred_count} messages copied from {source_mailbox} to {dest_mailbox}.")
             print(f"{duplicate_count} duplicate messages skipped.")
