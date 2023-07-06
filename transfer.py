@@ -84,28 +84,36 @@ with connect_imap(source_host, source_username, source_password) as source_clien
                 print("Due to the large quantity of emails, this may take some time. Please wait...")
 
             # Get the full message data (including FLAGS) for the messages
-            response = source_client.fetch(messages, ['BODY.PEEK[]', 'FLAGS'])
+            response = source_client.fetch(messages, ['BODY.PEEK[]', 'FLAGS', 'RFC822.SIZE'])
 
             transferred_count = 0
             duplicate_count = 0
+            total_size = 0
 
-            for msgid in tqdm(response.keys(), desc="Copying emails", unit="email"):
-                raw_message = response[msgid][b'BODY[]']
-                message = message_from_bytes(raw_message)
-                flags = response[msgid][b'FLAGS']
+            with tqdm(total=len(response), desc="Copying emails", unit="email", ncols=80) as pbar:
+                for msgid in response.keys():
+                    raw_message = response[msgid][b'BODY[]']
+                    message = message_from_bytes(raw_message)
+                    flags = response[msgid][b'FLAGS']
+                    size = response[msgid][b'RFC822.SIZE']
+                    total_size += size
 
-                # Check if the message is already present in the destination mailbox
-                message_id = message['Message-ID'].strip() if message['Message-ID'] else ''
-                dest_search = dest_client.search(['HEADER', 'Message-ID', message_id]) if message_id else []
+                    # Check if the message is already present in the destination mailbox
+                    message_id = message['Message-ID'].strip() if message['Message-ID'] else ''
+                    dest_search = dest_client.search(['HEADER', 'Message-ID', message_id]) if message_id else []
 
-                if dest_search:
-                    duplicate_count += 1
-                else:
-                    dest_client.append(dest_box, message.as_bytes(), flags=flags)
-                    transferred_count += 1
+                    if dest_search:
+                        duplicate_count += 1
+                    else:
+                        dest_client.append(dest_box, message.as_bytes(), flags=flags)
+                        transferred_count += 1
 
-            print(f"{transferred_count} messages copied from {src_box} to {dest_box}.")
+                    pbar.set_postfix({"Size moved:": f"{total_size/(1024*1024):.2f} MB"})
+                    pbar.update(1)
+
+            print(f"\n{transferred_count} messages copied from {src_box} to {dest_box}.")
             print(f"{duplicate_count} duplicate messages skipped.")
+            print(f"Total size of moved emails: {total_size / (1024 * 1024):.2f} MB")
 
     else:
         source_mailbox = choose_mailbox(source_client, "Source mailboxes:")
@@ -132,24 +140,32 @@ with connect_imap(source_host, source_username, source_password) as source_clien
             print("Due to the large quantity of emails, this may take some time. Please wait...")
 
         # Get the full message data (including FLAGS) for the messages
-        response = source_client.fetch(messages, ['BODY.PEEK[]', 'FLAGS'])
+        response = source_client.fetch(messages, ['BODY.PEEK[]', 'FLAGS', 'RFC822.SIZE'])
 
         transferred_count = 0
         duplicate_count = 0
+        total_size = 0
 
-        for msgid in tqdm(response.keys(), desc="Copying emails", unit="email"):
-            raw_message = response[msgid][b'BODY[]']
-            message = message_from_bytes(raw_message)
-            flags = response[msgid][b'FLAGS']
+        with tqdm(total=len(response), desc="Copying emails", unit="email", ncols=80) as pbar:
+            for msgid in response.keys():
+                raw_message = response[msgid][b'BODY[]']
+                message = message_from_bytes(raw_message)
+                flags = response[msgid][b'FLAGS']
+                size = response[msgid][b'RFC822.SIZE']
+                total_size += size
 
-            # Check if the message is already present in the destination mailbox
-            message_id = message['Message-ID'].strip() if message['Message-ID'] else ''
-            dest_search = dest_client.search(['HEADER', 'Message-ID', message_id]) if message_id else []
-            if dest_search:
-                duplicate_count += 1
-            else:
-                dest_client.append(dest_mailbox, message.as_bytes(), flags=flags)
-                transferred_count += 1
+                # Check if the message is already present in the destination mailbox
+                message_id = message['Message-ID'].strip() if message['Message-ID'] else ''
+                dest_search = dest_client.search(['HEADER', 'Message-ID', message_id]) if message_id else []
+                if dest_search:
+                    duplicate_count += 1
+                else:
+                    dest_client.append(dest_mailbox, message.as_bytes(), flags=flags)
+                    transferred_count += 1
 
-        print(f"{transferred_count} messages copied from {source_mailbox} to {dest_mailbox}.")
+                pbar.set_postfix({"Transferred": transferred_count, "Duplicates": duplicate_count, "Total Size": f"{total_size/(1024*1024):.2f} MB"})
+                pbar.update(1)
+
+        print(f"\n{transferred_count} messages copied from {source_mailbox} to {dest_mailbox}.")
         print(f"{duplicate_count} duplicate messages skipped.")
+        print(f"Total size of moved emails: {total_size / (1024 * 1024):.2f}MB")
