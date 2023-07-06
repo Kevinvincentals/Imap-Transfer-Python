@@ -62,5 +62,5 @@ No, the script will not remove any mails from the source. It will only take a co
 If you have any feedback, please reach out to me at kevin@tideo.dk
 
 
-![Logo](https://tideo.dk/images/logo-dark.png)
+![Logo](https://tideo.dk/images/logo-light.png)
 
