@@ -1,9 +1,11 @@
 import os
 import zipfile
+import pyzipper
 from getpass import getpass
 from imapclient import IMAPClient
 from email import message_from_bytes
 from tqdm import tqdm
+import shutil
 
 def choose_mailbox(client, prompt):
     """Let the user choose a mailbox from the given IMAPClient instance."""
@@ -31,16 +33,22 @@ def match_mailboxes(source_client, dest_client):
     return matches
 
 # Backup option
-backup_option = input("Choose an option:\n1. Transfer emails\n2. Backup emails\nEnter your choice: ")
+backup_option = input("Choose an option:\n1. Transfer emails\n2. Backup emails\n3. Restore emails\nEnter your choice: ")
 while backup_option not in ['1', '2', '3']:
     print("Invalid choice, please try again.")
-    backup_option = input("Choose an option:\n1. Transfer emails\n2. Backup emails\nEnter your choice: ")
-
+    backup_option = input("Choose an option:\n1. Transfer emails\n2. Backup emails\n3. Restore emails\nEnter your choice: ")
 
 # Source account details
-source_host = input("Enter the source host (IMAP server): ")
-source_username = input("Enter the source username: ")
-source_password = getpass("Enter the source password: ")
+if backup_option == '1':
+    source_host = input("Enter the source host (IMAP server): ")
+    source_username = input("Enter the source username: ")
+    source_password = getpass("Enter the source password: ")
+elif backup_option == '2':
+    source_host = input("Enter the source host (IMAP server): ")
+    source_username = input("Enter the source username: ")
+    source_password = getpass("Enter the source password: ")
+else:
+    pass
 
 # Destination account details if transfer option is chosen
 if backup_option == '1':
@@ -50,7 +58,6 @@ if backup_option == '1':
 
 # Prepare backup file if backup option is chosen
 if backup_option == '2':
-    backup_password = getpass("Enter a password for the backup file: ")
     backup_filename = "email_backup.zip"
     backup_mailboxes = []
 
@@ -204,6 +211,7 @@ if backup_option == '1':
             print(f"  - Total size: {total_size / (1024 * 1024):.2f} MB")
 
 elif backup_option == '2':
+
     # Connect to the source server for backup
     with connect_imap(source_host, source_username, source_password) as source_client:
         # Get the list of source mailboxes
@@ -230,7 +238,14 @@ elif backup_option == '2':
         with connect_imap(source_host, source_username, source_password) as source_client:
             print(f"\nBacking up {len(backup_mailboxes)} mailboxes...")
 
-            with zipfile.ZipFile(backup_filename, "w", zipfile.ZIP_DEFLATED) as backup_zip:
+            backup_filename = "email_backup.zip"
+            
+            # Set the password for the zip file
+            password = getpass("Enter a password for the backup file: ")
+
+            with pyzipper.AESZipFile(backup_filename, "w", compression=zipfile.ZIP_DEFLATED, encryption=pyzipper.WZ_AES) as backup_zip:
+                backup_zip.setpassword(password.encode())
+
                 backup_count = 0
 
                 for mailbox in tqdm(backup_mailboxes, desc="Backing up mailboxes", ncols=80):
@@ -246,9 +261,9 @@ elif backup_option == '2':
                         raw_message = data[b'BODY[]']
                         message = message_from_bytes(raw_message)
 
-                        # Create a folder for the current message within the backup zip file
-                        message_folder = f"{mailbox}/{msgid}"
-                        backup_zip.writestr(f"{message_folder}/message.eml", raw_message)
+                        # Create an individual .eml file for each email using its ID
+                        folder_name = mailbox.replace("/", "_")  # Replace forward slash with underscore in mailbox name
+                        backup_zip.writestr(f"{folder_name}/{msgid}.eml", raw_message)
 
                         # Save attachments
                         for part in message.walk():
@@ -260,10 +275,137 @@ elif backup_option == '2':
                             filename = part.get_filename()
                             if filename:
                                 attachment_data = part.get_payload(decode=True)
-                                backup_zip.writestr(f"{message_folder}/{filename}", attachment_data)
+                                backup_zip.writestr(f"{folder_name}/{msgid}_{filename}", attachment_data)
 
                         backup_count += 1
 
             print(f"\nBackup created successfully: {backup_filename}")
             print(f"Total emails backed up: {backup_count}")
-            print('Please note, there is currently no logic to handle importing of emails')
+            print("The backup file is password protected.")
+
+
+
+
+
+elif backup_option == '3':
+    # Get the list of backup files
+    backup_files = [file for file in os.listdir() if file.endswith(".zip")]
+
+    if not backup_files:
+        print("No backup files found in the current directory.")
+        exit()
+
+    print("Available backup files:")
+    for i, file in enumerate(backup_files, 1):
+        print(f"{i}. {file}")
+
+    choice = input("Choose a backup file (by number): ")
+    if choice.isdigit() and 1 <= int(choice) <= len(backup_files):
+        selected_file = backup_files[int(choice) - 1]
+        print(f"Selected backup file: {selected_file}")
+
+        # Extract the backup file
+        backup_folder = selected_file.replace(".zip", "")
+        password = getpass("Enter the password for the backup file: ")  # Ask for password
+        with pyzipper.AESZipFile(selected_file, "r", encryption=pyzipper.WZ_AES) as backup_zip:
+            backup_zip.pwd = password.encode()
+            backup_zip.extractall(backup_folder)
+
+        # Get the list of mailbox directories in the backup folder
+        backup_mailboxes = [entry for entry in os.listdir(backup_folder) if os.path.isdir(os.path.join(backup_folder, entry))]
+
+        print("Source mailboxes:")
+        for i, mailbox in enumerate(backup_mailboxes, 1):
+            print(f"{i}. {mailbox}")
+
+        choice = input("Choose source mailboxes to restore (comma-separated numbers): ")
+        selected_indices = choice.split(",")
+        selected_indices = [int(index.strip()) for index in selected_indices if index.strip().isdigit()]
+
+        selected_mailboxes = [backup_mailboxes[index - 1] for index in selected_indices if 1 <= index <= len(backup_mailboxes)]
+
+        if not selected_mailboxes:
+            print("No valid mailboxes selected for restore.")
+            exit()
+
+        # Connect to the destination server for restore
+        dest_host = input("Enter the destination host (IMAP server): ")
+        dest_username = input("Enter the destination username: ")
+        dest_password = getpass("Enter the destination password: ")
+
+        with connect_imap(dest_host, dest_username, dest_password) as dest_client:
+            print("Destination mailboxes:")
+            dest_mailboxes = dest_client.list_folders()
+
+            for i, mailbox in enumerate(dest_mailboxes, 1):
+                print(f"{i}. {mailbox}")
+
+            choice = input("Choose destination mailboxes (comma-separated numbers): ")
+            selected_indices = choice.split(",")
+            selected_indices = [int(index.strip()) for index in selected_indices if index.strip().isdigit()]
+
+            selected_dest_mailboxes = [dest_mailboxes[index - 1] for index in selected_indices if 1 <= index <= len(dest_mailboxes)]
+
+            if not selected_dest_mailboxes:
+                print("No valid destination mailboxes selected.")
+                exit()
+
+            for mailbox in selected_mailboxes:
+                print(f"\nRestoring emails from {mailbox} to the selected destination mailboxes...")
+
+                source_folder = os.path.join(backup_folder, mailbox)
+
+                for dest_mailbox in selected_dest_mailboxes:
+                    print(f"\nRestoring emails to destination mailbox: {dest_mailbox[2]}")  # Extract the mailbox name from the tuple
+
+                    # Select the destination mailbox
+                    dest_client.select_folder(dest_mailbox[2])  # Select the existing destination mailbox
+
+                    # Fetch all message files from the source mailbox folder
+                    message_files = [file for file in os.listdir(source_folder) if file.endswith(".eml")]
+
+                    print(f"Total emails to be restored in {mailbox}: {len(message_files)}")
+
+                    if len(message_files) > 4000:
+                        print("Due to the large quantity of emails, this may take some time. Please wait...")
+
+                    transferred_count = 0
+                    duplicate_count = 0
+                    total_size = 0
+
+                    with tqdm(total=len(message_files), desc="Restoring emails", unit="email", ncols=80) as pbar:
+                        for message_file in message_files:
+                            with open(os.path.join(source_folder, message_file), "rb") as file:
+                                raw_message = file.read()
+
+                            message = message_from_bytes(raw_message)
+                            flags = None  # You may modify this based on your requirements
+                            size = os.path.getsize(os.path.join(source_folder, message_file))
+                            total_size += size
+
+                            # Check if the message is already present in the destination mailbox
+                            message_id = message['Message-ID'].strip() if message['Message-ID'] else ''
+                            dest_search = dest_client.search(['HEADER', 'Message-ID', message_id]) if message_id else []
+
+                            if dest_search:
+                                duplicate_count += 1
+                            else:
+                                dest_client.append(dest_mailbox[2], raw_message, flags=flags or [])  # Set flags to an empty list if it is None
+                                transferred_count += 1
+
+                            pbar.set_postfix(
+                                {"Restored": transferred_count, "Duplicates": duplicate_count, "Total Size": f"{total_size / (1024 * 1024):.2f} MB"}
+                            )
+                            pbar.update(1)
+
+                    print(f"\n{transferred_count} messages restored to {dest_mailbox[2]} mailbox {mailbox}.")
+                    print(f"{duplicate_count} duplicate messages skipped.")
+                    print(f"Total size of restored emails in {mailbox}: {total_size / (1024 * 1024):.2f} MB")
+                    
+            # After the restore process, clean up
+            folder_path = "email_backup"
+            if os.path.exists(folder_path):
+                shutil.rmtree(folder_path)
+                print("The 'email_backup' folder and its contents have been removed.")
+            else:
+                print("The 'email_backup' folder does not exist.")
