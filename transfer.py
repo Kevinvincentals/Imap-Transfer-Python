@@ -6,6 +6,7 @@ from imapclient import IMAPClient
 from email import message_from_bytes
 from tqdm import tqdm
 import shutil
+import time
 
 
 
@@ -43,6 +44,25 @@ def match_mailboxes(source_client, dest_client):
                 matches.append((src_box, dest_box))
                 break
     return matches
+
+def filter_flags_for_append(flags):
+    """Filter out system flags that cannot be set by clients when appending messages.
+    Specifically removes \\RECENT which is automatically set by the server."""
+    if flags is None:
+        return []
+    
+    # Convert to list if it's a set or tuple
+    flags_list = list(flags) if isinstance(flags, (set, tuple)) else flags
+    
+    # Filter out \RECENT flag (can be bytes or string)
+    filtered_flags = []
+    for flag in flags_list:
+        # Handle both bytes and string representations
+        flag_str = flag.decode('utf-8') if isinstance(flag, bytes) else str(flag)
+        if flag_str.upper() not in ['\\RECENT', 'RECENT']:
+            filtered_flags.append(flag)
+    
+    return filtered_flags
 
 # Backup option
 backup_option = input("Choose an option:\n1. Transfer emails\n2. Backup emails\n3. Restore emails\nEnter your choice: ")
@@ -84,6 +104,73 @@ def connect_imap(host, username, password):
             continue
     raise ValueError(f"Could not connect to {host} with the provided credentials")
 
+def ensure_connection(client, host, username, password, current_folder=None):
+    """Ensure the IMAP connection is alive, reconnect if necessary."""
+    try:
+        # Try a simple NOOP command to check if connection is alive
+        client.noop()
+        return client
+    except Exception:
+        # Connection is dead, reconnect
+        print(f"\nConnection lost. Reconnecting to {host}...")
+        try:
+            new_client = connect_imap(host, username, password)
+            if current_folder:
+                new_client.select_folder(current_folder)
+            print("Reconnected successfully.")
+            return new_client
+        except Exception as e:
+            print(f"Failed to reconnect: {e}")
+            raise
+
+def safe_search(client, host, username, password, current_folder, criteria, max_retries=3):
+    """Safely execute a search operation with retry and reconnection logic.
+    Returns tuple: (search_results, updated_client)"""
+    for attempt in range(max_retries):
+        try:
+            client = ensure_connection(client, host, username, password, current_folder)
+            result = client.search(criteria)
+            return result, client
+        except Exception as e:
+            if attempt < max_retries - 1:
+                print(f"Search failed (attempt {attempt + 1}/{max_retries}), retrying...")
+                time.sleep(2)
+                continue
+            else:
+                raise
+
+def safe_append(client, host, username, password, current_folder, mailbox, message_bytes, flags=None, max_retries=3):
+    """Safely execute an append operation with retry and reconnection logic.
+    Returns tuple: (append_result, updated_client)"""
+    for attempt in range(max_retries):
+        try:
+            client = ensure_connection(client, host, username, password, current_folder)
+            result = client.append(mailbox, message_bytes, flags=flags)
+            return result, client
+        except Exception as e:
+            if attempt < max_retries - 1:
+                print(f"Append failed (attempt {attempt + 1}/{max_retries}), retrying...")
+                time.sleep(2)
+                continue
+            else:
+                raise
+
+def safe_fetch(client, host, username, password, current_folder, msg_id, data_items, max_retries=3):
+    """Safely execute a fetch operation with retry and reconnection logic.
+    Returns tuple: (fetch_results, updated_client)"""
+    for attempt in range(max_retries):
+        try:
+            client = ensure_connection(client, host, username, password, current_folder)
+            result = client.fetch(msg_id, data_items)
+            return result, client
+        except Exception as e:
+            if attempt < max_retries - 1:
+                print(f"Fetch failed (attempt {attempt + 1}/{max_retries}), retrying...")
+                time.sleep(2)
+                continue
+            else:
+                raise
+
 if backup_option == '1':
     # Connect to the servers
     with connect_imap(source_host, source_username, source_password) as source_client, \
@@ -124,9 +211,17 @@ if backup_option == '1':
                 total_size = 0
 
                 with tqdm(total=len(messages), desc="Copying emails", unit="email", ncols=80) as pbar:
-                    for msg_id in messages:
+                    for idx, msg_id in enumerate(messages):
+                        # Keep connection alive every 50 emails
+                        if idx > 0 and idx % 50 == 0:
+                            try:
+                                source_client.noop()
+                                dest_client.noop()
+                            except:
+                                pass
+
                         # Fetch message data from source mailbox
-                        response = source_client.fetch(msg_id, ['BODY.PEEK[]', 'FLAGS', 'RFC822.SIZE'])
+                        response, source_client = safe_fetch(source_client, source_host, source_username, source_password, src_box, msg_id, ['BODY.PEEK[]', 'FLAGS', 'RFC822.SIZE'])
                         raw_message = response[msg_id][b'BODY[]']
                         message = message_from_bytes(raw_message)
                         flags = response[msg_id][b'FLAGS']
@@ -135,12 +230,20 @@ if backup_option == '1':
 
                         # Check if the message is already present in the destination mailbox
                         message_id = message['Message-ID'].strip() if message['Message-ID'] else ''
-                        dest_search = dest_client.search(['HEADER', 'Message-ID', message_id]) if message_id else []
+                        if message_id:
+                            try:
+                                dest_search, dest_client = safe_search(dest_client, dest_host, dest_username, dest_password, dest_box, ['HEADER', 'Message-ID', message_id])
+                            except Exception as e:
+                                print(f"\nWarning: Could not check for duplicates: {e}. Proceeding with append...")
+                                dest_search = []
+                        else:
+                            dest_search = []
 
                         if dest_search:
                             duplicate_count += 1
                         else:
-                            dest_client.append(dest_box, message.as_bytes(), flags=flags)
+                            filtered_flags = filter_flags_for_append(flags)
+                            _, dest_client = safe_append(dest_client, dest_host, dest_username, dest_password, dest_box, dest_box, message.as_bytes(), flags=filtered_flags)
                             transferred_count += 1
 
                         pbar.set_postfix({"Size moved:": f"{total_size / (1024 * 1024):.2f} MB"})
@@ -167,9 +270,17 @@ if backup_option == '1':
             total_size = 0
 
             with tqdm(total=len(source_messages), desc="Copying emails", unit="email", ncols=80) as pbar:
-                for msg_id in source_messages:
+                for idx, msg_id in enumerate(source_messages):
+                    # Keep connection alive every 50 emails
+                    if idx > 0 and idx % 50 == 0:
+                        try:
+                            source_client.noop()
+                            dest_client.noop()
+                        except:
+                            pass
+
                     # Fetch message data from source mailbox
-                    response = source_client.fetch(msg_id, ['BODY.PEEK[]', 'FLAGS', 'RFC822.SIZE'])
+                    response, source_client = safe_fetch(source_client, source_host, source_username, source_password, source_mailbox, msg_id, ['BODY.PEEK[]', 'FLAGS', 'RFC822.SIZE'])
                     raw_message = response[msg_id][b'BODY[]']
                     message = message_from_bytes(raw_message)
                     flags = response[msg_id][b'FLAGS']
@@ -178,12 +289,20 @@ if backup_option == '1':
 
                     # Check if the message is already present in the destination mailbox
                     message_id = message['Message-ID'].strip() if message['Message-ID'] else ''
-                    dest_search = dest_client.search(['HEADER', 'Message-ID', message_id]) if message_id else []
+                    if message_id:
+                        try:
+                            dest_search, dest_client = safe_search(dest_client, dest_host, dest_username, dest_password, dest_mailbox, ['HEADER', 'Message-ID', message_id])
+                        except Exception as e:
+                            print(f"\nWarning: Could not check for duplicates: {e}. Proceeding with append...")
+                            dest_search = []
+                    else:
+                        dest_search = []
 
                     if dest_search:
                         duplicate_count += 1
                     else:
-                        dest_client.append(dest_mailbox, message.as_bytes(), flags=flags)
+                        filtered_flags = filter_flags_for_append(flags)
+                        _, dest_client = safe_append(dest_client, dest_host, dest_username, dest_password, dest_mailbox, dest_mailbox, message.as_bytes(), flags=filtered_flags)
                         transferred_count += 1
 
                     pbar.set_postfix({"Transferred": transferred_count, "Duplicates": duplicate_count,
@@ -373,7 +492,14 @@ elif backup_option == '3':
                     total_size = 0
 
                     with tqdm(total=len(message_files), desc="Restoring emails", unit="email", ncols=80) as pbar:
-                        for message_file in message_files:
+                        for idx, message_file in enumerate(message_files):
+                            # Keep connection alive every 50 emails
+                            if idx > 0 and idx % 50 == 0:
+                                try:
+                                    dest_client.noop()
+                                except:
+                                    pass
+
                             with open(os.path.join(source_folder, message_file), "rb") as file:
                                 raw_message = file.read()
 
@@ -384,12 +510,20 @@ elif backup_option == '3':
 
                             # Check if the message is already present in the destination mailbox
                             message_id = message['Message-ID'].strip() if message['Message-ID'] else ''
-                            dest_search = dest_client.search(['HEADER', 'Message-ID', message_id]) if message_id else []
+                            if message_id:
+                                try:
+                                    dest_search, dest_client = safe_search(dest_client, dest_host, dest_username, dest_password, dest_mailbox[2], ['HEADER', 'Message-ID', message_id])
+                                except Exception as e:
+                                    print(f"\nWarning: Could not check for duplicates: {e}. Proceeding with append...")
+                                    dest_search = []
+                            else:
+                                dest_search = []
 
                             if dest_search:
                                 duplicate_count += 1
                             else:
-                                dest_client.append(dest_mailbox[2], raw_message, flags=flags or [])  # Set flags to an empty list if it is None
+                                filtered_flags = filter_flags_for_append(flags) if flags else []
+                                _, dest_client = safe_append(dest_client, dest_host, dest_username, dest_password, dest_mailbox[2], dest_mailbox[2], raw_message, flags=filtered_flags)
                                 transferred_count += 1
 
                             pbar.set_postfix(
